@@ -1,0 +1,7 @@
+Flask
+requests
+pyrogram
+tgcrypto
+aiohttp
+tqdm
+colorama
