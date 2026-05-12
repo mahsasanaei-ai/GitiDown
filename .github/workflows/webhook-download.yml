@@ -1,0 +1,90 @@
+name: 'Webhook Download'
+
+on:
+  repository_dispatch:
+    types: [download-request]
+
+jobs:
+  download-and-send-back:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # Max 6 hours
+    
+    steps:
+      - name: 📥 Receive URL from Webhook
+        run: |
+          echo "🔗 Received URL: ${{ github.event.client_payload.url }}"
+          echo "🔐 Password: ${{ github.event.client_payload.password }}"
+          echo "🆔 Run ID: ${{ github.event.client_payload.run_id }}"
+          
+          # Save to environment variables
+          echo "DOWNLOAD_URL=${{ github.event.client_payload.url }}" >> $GITHUB_ENV
+          echo "PASSWORD=${{ github.event.client_payload.password }}" >> $GITHUB_ENV
+          echo "RUN_ID=${{ github.event.client_payload.run_id }}" >> $GITHUB_ENV
+          echo "CALLBACK_URL=${{ github.event.client_payload.callback_url }}" >> $GITHUB_ENV
+      
+      - name: ⚙️ Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full aria2 curl jq
+      
+      - name: 📥 Download file with resume and retry
+        run: |
+          echo "⏳ Starting download..."
+          
+          # Extract filename from URL
+          FILENAME=$(basename "$DOWNLOAD_URL" | cut -d'?' -f1)
+          [ -z "$FILENAME" ] && FILENAME="downloaded_file"
+          
+          # Download with aria2 (resume capable, 16 parallel connections)
+          aria2c --max-connection-per-server=16 \
+                 --split=16 \
+                 --min-split-size=1M \
+                 --continue=true \
+                 --max-tries=10 \
+                 --retry-wait=10 \
+                 --user-agent="Mozilla/5.0" \
+                 -o "$FILENAME" \
+                 "$DOWNLOAD_URL"
+          
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+      
+      - name: 🔐 Compress with password (optional)
+        run: |
+          if [ -n "$PASSWORD" ]; then
+            7z a -p"$PASSWORD" -mx=5 "archive.7z" "$FILENAME"
+          else
+            7z a -mx=5 "archive.7z" "$FILENAME"
+          fi
+          
+          # Calculate MD5 for verification
+          md5sum "archive.7z" > archive.7z.md5
+      
+      - name: 📤 Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: download-${{ env.RUN_ID }}
+          name: "Download ${{ env.RUN_ID }}"
+          files: |
+            archive.7z
+            archive.7z.md5
+          generate_release_notes: false
+      
+      - name: 📢 Send download link back to local webhook
+        run: |
+          # Build download link
+          DOWNLOAD_LINK="https://github.com/${{ github.repository }}/releases/download/download-${{ env.RUN_ID }}/archive.7z"
+          
+          echo "✅ Download complete!"
+          echo "🔗 Download link: $DOWNLOAD_LINK"
+          
+          # Send to your local system
+          curl -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"download_url\": \"$DOWNLOAD_LINK\",
+              \"run_id\": \"${{ env.RUN_ID }}\",
+              \"filename\": \"archive_${{ env.RUN_ID }}.7z\",
+              \"status\": \"completed\"
+            }" \
+            --max-time 30 \
+            --retry 3 || echo "⚠️ Could not connect to local webhook, but file is on release"
